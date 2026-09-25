@@ -2,20 +2,20 @@
 package lazers
 
 import (
- "bytes"
- "context"
- "crypto/rand"
- "crypto/sha256"
- "encoding/hex"
- "encoding/json"
- "errors"
- "fmt"
- "net/http"
- "reflect"
- "runtime"
- "strings"
- "sync"
- "time"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
 )
 
 const protocolVersion = "1"
@@ -24,38 +24,495 @@ const maxString = 10000
 const maxKeys = 100
 const maxDepth = 6
 
-type Transport interface { Do(*http.Request) (*http.Response, error) }
-type Config struct { APIKey, Endpoint, ProjectID, Environment, ServiceName, Release string; Enabled bool; Disabled bool; MaxQueueSize, MaxRetries int; RetryBaseDelay, Timeout time.Duration; HTTPClient Transport }
-type CaptureContext struct { Metadata map[string]any; Tags, Labels []string; Actor, Resource map[string]any; AffectedUsers, RelatedEntities []any; Severity, Environment, CorrelationID, Fingerprint, Provider, EventName, SourceType, TraceID, OccurredAt string; Payload map[string]any; EventCategory string }
-type SignalInput struct { Title, Type, EventCategory, Severity string; Payload map[string]any; Context CaptureContext }
-type queued struct { signal map[string]any; attempts int; next time.Time }
-type Client struct { cfg Config; transport Transport; mu sync.Mutex; queue []*queued; wake chan struct{}; done chan struct{}; stopped chan struct{}; once sync.Once }
+type Transport interface {
+	Do(*http.Request) (*http.Response, error)
+}
+type Config struct {
+	APIKey, Endpoint, ProjectID, Environment, ServiceName, Release string
+	Enabled                                                        bool
+	Disabled                                                       bool
+	MaxQueueSize, MaxRetries                                       int
+	RetryBaseDelay, Timeout                                        time.Duration
+	HTTPClient                                                     Transport
+}
+type CaptureContext struct {
+	Metadata                                                                                                map[string]any
+	Tags, Labels                                                                                            []string
+	Actor, Resource                                                                                         map[string]any
+	AffectedUsers, RelatedEntities                                                                          []any
+	Severity, Environment, CorrelationID, Fingerprint, Provider, EventName, SourceType, TraceID, OccurredAt string
+	Payload                                                                                                 map[string]any
+	EventCategory                                                                                           string
+}
+type SignalInput struct {
+	Title, Type, EventCategory, Severity string
+	Payload                              map[string]any
+	Context                              CaptureContext
+}
+type queued struct {
+	signal   map[string]any
+	attempts int
+	next     time.Time
+}
+type Client struct {
+	cfg       Config
+	transport Transport
+	mu        sync.Mutex
+	queue     []*queued
+	wake      chan struct{}
+	done      chan struct{}
+	stopped   chan struct{}
+	once      sync.Once
+}
 
 func NewClient(cfg Config) (*Client, error) {
- for name, value := range map[string]string{"APIKey":cfg.APIKey,"Endpoint":cfg.Endpoint,"ProjectID":cfg.ProjectID,"Environment":cfg.Environment,"ServiceName":cfg.ServiceName} { if strings.TrimSpace(value)=="" { return nil, fmt.Errorf("lazers: %s is required", name) } }
- if cfg.MaxQueueSize<=0 { cfg.MaxQueueSize=100 }; if cfg.MaxRetries==0 { cfg.MaxRetries=5 }; if cfg.RetryBaseDelay<=0 { cfg.RetryBaseDelay=250*time.Millisecond }; if cfg.Timeout<=0 { cfg.Timeout=5*time.Second }
- cfg.Enabled = !cfg.Disabled
- tr:=cfg.HTTPClient; if tr==nil { tr=&http.Client{Timeout:cfg.Timeout} }
- c:=&Client{cfg:cfg,transport:tr,wake:make(chan struct{},1),done:make(chan struct{}),stopped:make(chan struct{})}
- go c.worker(); return c,nil
+	for name, value := range map[string]string{"APIKey": cfg.APIKey, "Endpoint": cfg.Endpoint, "ProjectID": cfg.ProjectID, "Environment": cfg.Environment, "ServiceName": cfg.ServiceName} {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("lazers: %s is required", name)
+		}
+	}
+	if cfg.MaxQueueSize <= 0 {
+		cfg.MaxQueueSize = 100
+	}
+	if cfg.MaxRetries == 0 {
+		cfg.MaxRetries = 5
+	}
+	if cfg.RetryBaseDelay <= 0 {
+		cfg.RetryBaseDelay = 250 * time.Millisecond
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 5 * time.Second
+	}
+	cfg.Enabled = !cfg.Disabled
+	tr := cfg.HTTPClient
+	if tr == nil {
+		tr = &http.Client{Timeout: cfg.Timeout}
+	}
+	c := &Client{cfg: cfg, transport: tr, wake: make(chan struct{}, 1), done: make(chan struct{}), stopped: make(chan struct{})}
+	go c.worker()
+	return c, nil
 }
+
 // NewClientEnabled creates a client explicitly enabled; Config.Enabled false disables delivery.
-func NewClientEnabled(cfg Config) (*Client,error) { cfg.Enabled=true; return NewClient(cfg) }
-func (c *Client) CaptureSignal(in SignalInput) { if !c.cfg.Enabled { return }; defer func(){ _=recover() }(); if in.Type=="" { in.Type="custom.event" }; if in.EventCategory=="" { in.EventCategory=category(in.Type) }; if in.Severity=="" { in.Severity="info" }; s:=c.normalize(in); c.mu.Lock(); c.queue=append(c.queue,&queued{signal:s,next:time.Now()}); if len(c.queue)>c.cfg.MaxQueueSize { c.queue=c.queue[len(c.queue)-c.cfg.MaxQueueSize:] }; c.mu.Unlock(); c.notify() }
-func (c *Client) CaptureError(err error, ctx CaptureContext) { e:=serializeError(err,0); payload:=copyMap(ctx.Payload); payload["error"]=e; ctx.Payload=payload; if ctx.Severity=="" {ctx.Severity="error"}; c.CaptureSignal(SignalInput{Title:e["message"].(string),Type:"error.detected",EventCategory:"error",Severity:ctx.Severity,Payload:payload,Context:ctx}) }
-func (c *Client) CaptureMessage(message string, ctx CaptureContext) { p:=copyMap(ctx.Payload); p["message"]=message; if ctx.Severity=="" {ctx.Severity="info"}; c.CaptureSignal(SignalInput{Title:message,Type:"custom.event",EventCategory:"message",Severity:ctx.Severity,Payload:p,Context:ctx}) }
-func (c *Client) CaptureJobFailure(job string, err error, ctx CaptureContext) { p:=copyMap(ctx.Payload); p["error"]=serializeError(err,0); p["jobName"]=job; if ctx.Resource==nil {ctx.Resource=map[string]any{"type":"job","id":job,"name":job}}; if ctx.EventName=="" {ctx.EventName="job.failure"}; if ctx.Severity=="" {ctx.Severity="error"}; c.CaptureSignal(SignalInput{Title:"Job failed: "+job,Type:"job.failed",EventCategory:"job_failure",Severity:ctx.Severity,Payload:p,Context:ctx}) }
-func (c *Client) CaptureWebhookFailure(provider string, err error, ctx CaptureContext) { p:=copyMap(ctx.Payload); p["error"]=serializeError(err,0); p["provider"]=provider; ctx.Provider=provider; if ctx.SourceType=="" {ctx.SourceType="custom"}; if ctx.EventName=="" {ctx.EventName="webhook.failure"}; if ctx.Severity=="" {ctx.Severity="error"}; c.CaptureSignal(SignalInput{Title:"Webhook failed: "+provider,Type:"integration.failed",EventCategory:"webhook_failure",Severity:ctx.Severity,Payload:p,Context:ctx}) }
-func (c *Client) Flush(ctx context.Context) error { for { c.notify(); c.mu.Lock(); n:=len(c.queue); c.mu.Unlock(); if n==0 {return nil}; select {case <-ctx.Done():return ctx.Err(); case <-time.After(5*time.Millisecond):} } }
-func (c *Client) Close(ctx context.Context) error { err:=c.Flush(ctx); c.once.Do(func(){close(c.done)}); select {case <-c.stopped:return err; case <-ctx.Done():return ctx.Err()} }
-func (c *Client) QueueSize() int {c.mu.Lock();defer c.mu.Unlock();return len(c.queue)}
-func (c *Client) notify(){select{case c.wake<-struct{}{}:default:}}
-func (c *Client) worker(){defer close(c.stopped); timer:=time.NewTimer(time.Hour); defer timer.Stop(); for { c.mu.Lock(); var item *queued; var delay time.Duration; if len(c.queue)>0 {item=c.queue[0]; delay=time.Until(item.next)}; c.mu.Unlock(); if item==nil {select{case <-c.done:return;case <-c.wake:continue} }; if delay>0 { if !timer.Stop(){select{case <-timer.C:default:}}; timer.Reset(delay); select{case <-c.done:return;case <-c.wake:continue;case <-timer.C:} }; sent:=c.send(item); c.mu.Lock(); if len(c.queue)>0 && c.queue[0]==item && sent {c.queue=c.queue[1:]} ; c.mu.Unlock() } }
-func (c *Client) send(q *queued) bool { body,err:=json.Marshal(q.signal); if err==nil {ctx,cancel:=context.WithTimeout(context.Background(),c.cfg.Timeout); defer cancel(); req,e:=http.NewRequestWithContext(ctx,http.MethodPost,strings.TrimRight(c.cfg.Endpoint,"/")+"/signals/ingest",bytes.NewReader(body)); if e==nil {req.Header.Set("Content-Type","application/json");req.Header.Set("x-lazers-api-key",c.cfg.APIKey); resp,e:=c.transport.Do(req); if e==nil {status:=resp.StatusCode; resp.Body.Close(); if status>=200&&status<300 || !retryable(status){return true} } } }; q.attempts++; if q.attempts>=c.cfg.MaxRetries{return true}; q.next=time.Now().Add(minDuration(c.cfg.RetryBaseDelay*time.Duration(1<<min(q.attempts-1,16)),30*time.Second)); return false }
-func (c *Client) normalize(in SignalInput) map[string]any { x:=in.Context; provider:=x.Provider;if provider==""{provider="lazers-agent-sdk"};sourceType:=x.SourceType;if sourceType==""{sourceType="agent_sdk"}; release:=validRelease(first(x.ContextRelease(),c.cfg.Release)); payload:=sanitize(in.Payload,0).(map[string]any); md:=copyMap(x.Metadata);if release!=""{md["release"]=release};md["serviceName"]=c.cfg.ServiceName; metadata:=sanitize(md,0); errData,_:=payload["error"].(map[string]any); fp:=x.Fingerprint;if fp!=""{fp=stable(fp,256)}else{fp=fingerprint(in.EventCategory,in.Type,provider,x.EventName,x.Resource,errData,in.Title)}; sev:=in.Severity;if !contains([]string{"info","notice","warning","error","critical"},sev){sev="info"}; result:=map[string]any{"protocolVersion":protocolVersion,"schemaVersion":schemaVersion,"projectId":required(c.cfg.ProjectID,200),"environment":required(first(x.Environment,c.cfg.Environment),80),"eventCategory":in.EventCategory,"type":in.Type,"severity":sev,"title":required(in.Title,240),"occurredAt":first(x.OccurredAt,time.Now().UTC().Format("2006-01-02T15:04:05.000Z")),"fingerprint":fp,"traceId":first(x.TraceID,"exec_"+uuid()),"source":map[string]any{"type":sourceType,"provider":required(provider,80)},"privacy":map[string]any{"classification":"internal","containsPersonalData":false,"containsSecrets":false,"aiProcessingAllowed":true,"retention":"standard"},"payload":payload,"metadata":metadata,"status":"received"}; if x.EventName!=""{result["source"].(map[string]any)["eventName"]=required(x.EventName,160)};if x.CorrelationID!=""{result["correlationId"]=x.CorrelationID};if a:=actor(x.Actor);a!=nil{result["actor"]=a};for k,v:=range map[string]any{"resource":x.Resource,"tags":x.Tags,"labels":x.Labels,"affectedUsers":x.AffectedUsers,"relatedEntities":x.RelatedEntities}{if !reflect.ValueOf(v).IsNil(){result[k]=sanitize(v,0)}};return result }
-func (x CaptureContext) ContextRelease() string{return ""}
-func serializeError(err error, depth int) map[string]any { if err==nil{return map[string]any{"name":"NilError","message":"<nil>"}}; name:=reflect.TypeOf(err).String();if i:=strings.LastIndex(name,".");i>=0{name=name[i+1:]}; out:=map[string]any{"name":name,"message":err.Error()};type coder interface{Code() string};if c,ok:=err.(coder);ok{out["code"]=c.Code()};if u:=errors.Unwrap(err);u!=nil&&depth<3{out["cause"]=serializeError(u,depth+1)};return sanitize(out,0).(map[string]any) }
-func sanitize(v any, depth int) any {switch x:=v.(type){case nil,bool,int,int64,float64:return x;case string:return truncate(x,maxString);case map[string]any: if depth>=maxDepth{return "[TRUNCATED]"};out:=map[string]any{};n:=0;for k,val:=range x{if n>=maxKeys{break};n++;key:=truncate(k,160);if sensitive(k){out[key]="[REDACTED]"}else{out[key]=sanitize(val,depth+1)}};return out;case []any:if depth>=maxDepth{return "[TRUNCATED]"};out:=make([]any,0);for i,val:=range x{if i>=maxKeys{break};out=append(out,sanitize(val,depth+1))};return out;case []string: out:=make([]any,0,len(x));for _,v:=range x{out=append(out,sanitize(v,depth+1))};return out;default:return "[UNSUPPORTED_OBJECT]"}}
-func fingerprint(category,typ,provider,event string,resource map[string]any,err map[string]any,title string) string {parts:=[]string{category,typ,provider,event};if resource!=nil{for _,k:=range []string{"type","id"}{if v,ok:=resource[k].(string);ok{parts=append(parts,v)}}};if err!=nil{for _,k:=range []string{"name","message"}{if v,ok:=err[k].(string);ok{parts=append(parts,v)}}}else{parts=append(parts,title)};out:=[]string{};for _,p:=range parts{if strings.TrimSpace(p)!=""{out=append(out,stable(p,512))}};sum:=sha256.Sum256([]byte(strings.Join(out,"|")));return hex.EncodeToString(sum[:]) }
-func actor(v map[string]any) map[string]any {if v==nil{return nil};id,ok:=v["id"].(string);if !ok||strings.TrimSpace(id)==""{return nil};typ,_:=v["type"].(string);if !contains([]string{"user","customer","account","merchant","tenant","organization","other"},typ){typ="other"};out:=map[string]any{"type":typ,"id":required(id,200)};if l,ok:=v["label"].(string);ok&&strings.TrimSpace(l)!=""{out["label"]=truncate(strings.TrimSpace(l),240)};return out}
-func validRelease(v string)string{v=strings.TrimSpace(v);if v==""||contains([]string{"git-sha","sha","unknown","replace-me","placeholder","undefined","null"},strings.ToLower(v)){return ""};return v};func required(v string,n int)string{v=truncate(strings.TrimSpace(v),n);if v==""{return "unknown"};return v};func stable(v string,n int)string{return truncate(strings.ToLower(strings.Join(strings.Fields(v)," ")),n)};func truncate(v string,n int)string{r:=[]rune(v);if len(r)>n{return string(r[:n])};return v};func sensitive(k string)bool{k=strings.ToLower(k);k=strings.Map(func(r rune)rune{if r>='a'&&r<='z'||r>='0'&&r<='9'{return r};return -1},k);for _,s:=range []string{"password","passwd","secret","token","authorization","cookie","apikey","cardnumber","card","cvv","pin","refreshtoken","accesstoken","body","rawbody","webhookpayload"}{if strings.Contains(k,s){return true}};return false};func category(t string)string{switch t{case "error.detected":return "error";case "job.failed":return "job_failure";case "integration.failed":return "webhook_failure"};return "custom"};func retryable(s int)bool{return s==408||s==429||s>=500&&s<=599};func contains(a []string,s string)bool{for _,x:=range a{if x==s{return true}};return false};func first(a,b string)string{if a!=""{return a};return b};func min(a,b int)int{if a<b{return a};return b};func minDuration(a,b time.Duration)time.Duration{if a<b{return a};return b};func uuid()string{b:=make([]byte,16);if _,e:=rand.Read(b);e!=nil{return fmt.Sprintf("%d",time.Now().UnixNano())};b[6]=(b[6]&0x0f)|0x40;b[8]=(b[8]&0x3f)|0x80;return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",b[0:4],b[4:6],b[6:8],b[8:10],b[10:16])};var _ = runtime.GOOS
+func NewClientEnabled(cfg Config) (*Client, error) { cfg.Enabled = true; return NewClient(cfg) }
+func (c *Client) CaptureSignal(in SignalInput) {
+	if !c.cfg.Enabled {
+		return
+	}
+	defer func() { _ = recover() }()
+	if in.Type == "" {
+		in.Type = "custom.event"
+	}
+	if in.EventCategory == "" {
+		in.EventCategory = category(in.Type)
+	}
+	if in.Severity == "" {
+		in.Severity = "info"
+	}
+	s := c.normalize(in)
+	c.mu.Lock()
+	c.queue = append(c.queue, &queued{signal: s, next: time.Now()})
+	if len(c.queue) > c.cfg.MaxQueueSize {
+		c.queue = c.queue[len(c.queue)-c.cfg.MaxQueueSize:]
+	}
+	c.mu.Unlock()
+	c.notify()
+}
+func (c *Client) CaptureError(err error, ctx CaptureContext) {
+	e := serializeError(err, 0)
+	payload := copyMap(ctx.Payload)
+	payload["error"] = e
+	ctx.Payload = payload
+	if ctx.Severity == "" {
+		ctx.Severity = "error"
+	}
+	c.CaptureSignal(SignalInput{Title: e["message"].(string), Type: "error.detected", EventCategory: "error", Severity: ctx.Severity, Payload: payload, Context: ctx})
+}
+func (c *Client) CaptureMessage(message string, ctx CaptureContext) {
+	p := copyMap(ctx.Payload)
+	p["message"] = message
+	if ctx.Severity == "" {
+		ctx.Severity = "info"
+	}
+	c.CaptureSignal(SignalInput{Title: message, Type: "custom.event", EventCategory: "message", Severity: ctx.Severity, Payload: p, Context: ctx})
+}
+func (c *Client) CaptureJobFailure(job string, err error, ctx CaptureContext) {
+	p := copyMap(ctx.Payload)
+	p["error"] = serializeError(err, 0)
+	p["jobName"] = job
+	if ctx.Resource == nil {
+		ctx.Resource = map[string]any{"type": "job", "id": job, "name": job}
+	}
+	if ctx.EventName == "" {
+		ctx.EventName = "job.failure"
+	}
+	if ctx.Severity == "" {
+		ctx.Severity = "error"
+	}
+	c.CaptureSignal(SignalInput{Title: "Job failed: " + job, Type: "job.failed", EventCategory: "job_failure", Severity: ctx.Severity, Payload: p, Context: ctx})
+}
+func (c *Client) CaptureWebhookFailure(provider string, err error, ctx CaptureContext) {
+	p := copyMap(ctx.Payload)
+	p["error"] = serializeError(err, 0)
+	p["provider"] = provider
+	ctx.Provider = provider
+	if ctx.SourceType == "" {
+		ctx.SourceType = "custom"
+	}
+	if ctx.EventName == "" {
+		ctx.EventName = "webhook.failure"
+	}
+	if ctx.Severity == "" {
+		ctx.Severity = "error"
+	}
+	c.CaptureSignal(SignalInput{Title: "Webhook failed: " + provider, Type: "integration.failed", EventCategory: "webhook_failure", Severity: ctx.Severity, Payload: p, Context: ctx})
+}
+func (c *Client) Flush(ctx context.Context) error {
+	for {
+		c.notify()
+		c.mu.Lock()
+		n := len(c.queue)
+		c.mu.Unlock()
+		if n == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+func (c *Client) Close(ctx context.Context) error {
+	err := c.Flush(ctx)
+	c.once.Do(func() { close(c.done) })
+	select {
+	case <-c.stopped:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (c *Client) QueueSize() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.queue) }
+func (c *Client) notify() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+func (c *Client) worker() {
+	defer close(c.stopped)
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	for {
+		c.mu.Lock()
+		var item *queued
+		var delay time.Duration
+		if len(c.queue) > 0 {
+			item = c.queue[0]
+			delay = time.Until(item.next)
+		}
+		c.mu.Unlock()
+		if item == nil {
+			select {
+			case <-c.done:
+				return
+			case <-c.wake:
+				continue
+			}
+		}
+		if delay > 0 {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(delay)
+			select {
+			case <-c.done:
+				return
+			case <-c.wake:
+				continue
+			case <-timer.C:
+			}
+		}
+		sent := c.send(item)
+		c.mu.Lock()
+		if len(c.queue) > 0 && c.queue[0] == item && sent {
+			c.queue = c.queue[1:]
+		}
+		c.mu.Unlock()
+	}
+}
+func (c *Client) send(q *queued) bool {
+	body, err := json.Marshal(q.signal)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.Timeout)
+		defer cancel()
+		req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.Endpoint, "/")+"/signals/ingest", bytes.NewReader(body))
+		if e == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-lazers-api-key", c.cfg.APIKey)
+			resp, e := c.transport.Do(req)
+			if e == nil {
+				status := resp.StatusCode
+				resp.Body.Close()
+				if status >= 200 && status < 300 || !retryable(status) {
+					return true
+				}
+			}
+		}
+	}
+	q.attempts++
+	if q.attempts >= c.cfg.MaxRetries {
+		return true
+	}
+	q.next = time.Now().Add(minDuration(c.cfg.RetryBaseDelay*time.Duration(1<<min(q.attempts-1, 16)), 30*time.Second))
+	return false
+}
+func (c *Client) normalize(in SignalInput) map[string]any {
+	x := in.Context
+	provider := x.Provider
+	if provider == "" {
+		provider = "lazers-agent-sdk"
+	}
+	sourceType := x.SourceType
+	if sourceType == "" {
+		sourceType = "agent_sdk"
+	}
+	release := validRelease(first(x.ContextRelease(), c.cfg.Release))
+	payload := sanitize(in.Payload, 0).(map[string]any)
+	md := copyMap(x.Metadata)
+	if release != "" {
+		md["release"] = release
+	}
+	md["serviceName"] = c.cfg.ServiceName
+	metadata := sanitize(md, 0)
+	errData, _ := payload["error"].(map[string]any)
+	fp := x.Fingerprint
+	if fp != "" {
+		fp = stable(fp, 256)
+	} else {
+		fp = fingerprint(in.EventCategory, in.Type, provider, x.EventName, x.Resource, errData, in.Title)
+	}
+	sev := in.Severity
+	if !contains([]string{"info", "notice", "warning", "error", "critical"}, sev) {
+		sev = "info"
+	}
+	result := map[string]any{"protocolVersion": protocolVersion, "schemaVersion": schemaVersion, "projectId": required(c.cfg.ProjectID, 200), "environment": required(first(x.Environment, c.cfg.Environment), 80), "eventCategory": in.EventCategory, "type": in.Type, "severity": sev, "title": required(in.Title, 240), "occurredAt": first(x.OccurredAt, time.Now().UTC().Format("2006-01-02T15:04:05.000Z")), "fingerprint": fp, "traceId": first(x.TraceID, "exec_"+uuid()), "source": map[string]any{"type": sourceType, "provider": required(provider, 80)}, "privacy": map[string]any{"classification": "internal", "containsPersonalData": false, "containsSecrets": false, "aiProcessingAllowed": true, "retention": "standard"}, "payload": payload, "metadata": metadata, "status": "received"}
+	if x.EventName != "" {
+		result["source"].(map[string]any)["eventName"] = required(x.EventName, 160)
+	}
+	if x.CorrelationID != "" {
+		result["correlationId"] = x.CorrelationID
+	}
+	if a := actor(x.Actor); a != nil {
+		result["actor"] = a
+	}
+	for k, v := range map[string]any{"resource": x.Resource, "tags": x.Tags, "labels": x.Labels, "affectedUsers": x.AffectedUsers, "relatedEntities": x.RelatedEntities} {
+		if !reflect.ValueOf(v).IsNil() {
+			result[k] = sanitize(v, 0)
+		}
+	}
+	return result
+}
+func (x CaptureContext) ContextRelease() string { return "" }
+func serializeError(err error, depth int) map[string]any {
+	if err == nil {
+		return map[string]any{"name": "NilError", "message": "<nil>"}
+	}
+	name := reflect.TypeOf(err).String()
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	out := map[string]any{"name": name, "message": err.Error()}
+	type coder interface{ Code() string }
+	if c, ok := err.(coder); ok {
+		out["code"] = c.Code()
+	}
+	if u := errors.Unwrap(err); u != nil && depth < 3 {
+		out["cause"] = serializeError(u, depth+1)
+	}
+	return sanitize(out, 0).(map[string]any)
+}
+func sanitize(v any, depth int) any {
+	switch x := v.(type) {
+	case nil, bool, int, int64, float64:
+		return x
+	case string:
+		return truncate(x, maxString)
+	case map[string]any:
+		if depth >= maxDepth {
+			return "[TRUNCATED]"
+		}
+		out := map[string]any{}
+		n := 0
+		for k, val := range x {
+			if n >= maxKeys {
+				break
+			}
+			n++
+			key := truncate(k, 160)
+			if sensitive(k) {
+				out[key] = "[REDACTED]"
+			} else {
+				out[key] = sanitize(val, depth+1)
+			}
+		}
+		return out
+	case []any:
+		if depth >= maxDepth {
+			return "[TRUNCATED]"
+		}
+		out := make([]any, 0)
+		for i, val := range x {
+			if i >= maxKeys {
+				break
+			}
+			out = append(out, sanitize(val, depth+1))
+		}
+		return out
+	case []string:
+		out := make([]any, 0, len(x))
+		for _, v := range x {
+			out = append(out, sanitize(v, depth+1))
+		}
+		return out
+	default:
+		return "[UNSUPPORTED_OBJECT]"
+	}
+}
+func fingerprint(category, typ, provider, event string, resource map[string]any, err map[string]any, title string) string {
+	parts := []string{category, typ, provider, event}
+	if resource != nil {
+		for _, k := range []string{"type", "id"} {
+			if v, ok := resource[k].(string); ok {
+				parts = append(parts, v)
+			}
+		}
+	}
+	if err != nil {
+		for _, k := range []string{"name", "message"} {
+			if v, ok := err[k].(string); ok {
+				parts = append(parts, v)
+			}
+		}
+	} else {
+		parts = append(parts, title)
+	}
+	out := []string{}
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, stable(p, 512))
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.Join(out, "|")))
+	return hex.EncodeToString(sum[:])
+}
+func actor(v map[string]any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	id, ok := v["id"].(string)
+	if !ok || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	typ, _ := v["type"].(string)
+	if !contains([]string{"user", "customer", "account", "merchant", "tenant", "organization", "other"}, typ) {
+		typ = "other"
+	}
+	out := map[string]any{"type": typ, "id": required(id, 200)}
+	if l, ok := v["label"].(string); ok && strings.TrimSpace(l) != "" {
+		out["label"] = truncate(strings.TrimSpace(l), 240)
+	}
+	return out
+}
+func validRelease(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || contains([]string{"git-sha", "sha", "unknown", "replace-me", "placeholder", "undefined", "null"}, strings.ToLower(v)) {
+		return ""
+	}
+	return v
+}
+func required(v string, n int) string {
+	v = truncate(strings.TrimSpace(v), n)
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+func stable(v string, n int) string {
+	return truncate(strings.ToLower(strings.Join(strings.Fields(v), " ")), n)
+}
+func truncate(v string, n int) string {
+	r := []rune(v)
+	if len(r) > n {
+		return string(r[:n])
+	}
+	return v
+}
+func sensitive(k string) bool {
+	k = strings.ToLower(k)
+	k = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, k)
+	for _, s := range []string{"password", "passwd", "secret", "token", "authorization", "cookie", "apikey", "cardnumber", "card", "cvv", "pin", "refreshtoken", "accesstoken", "body", "rawbody", "webhookpayload"} {
+		if strings.Contains(k, s) {
+			return true
+		}
+	}
+	return false
+}
+func category(t string) string {
+	switch t {
+	case "error.detected":
+		return "error"
+	case "job.failed":
+		return "job_failure"
+	case "integration.failed":
+		return "webhook_failure"
+	}
+	return "custom"
+}
+func retryable(s int) bool { return s == 408 || s == 429 || s >= 500 && s <= 599 }
+func contains(a []string, s string) bool {
+	for _, x := range a {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+func first(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+func uuid() string {
+	b := make([]byte, 16)
+	if _, e := rand.Read(b); e != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+var _ = runtime.GOOS

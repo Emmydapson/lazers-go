@@ -1,3 +1,34 @@
 package main
-import ("context"; "log"; "net/http"; "os"; "os/signal"; "syscall"; "github.com/oneverse-technologies/lazers-go")
-func main(){ c,_:=lazers.NewClient(lazers.Config{APIKey:os.Getenv("LAZERS_API_KEY"),Endpoint:"https://api.lazers.app",ProjectID:"project_1",Environment:"production",ServiceName:"http-api"}); mux:=http.NewServeMux(); mux.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){defer func(){if v:=recover();v!=nil{c.CaptureMessage("panic recovered",lazers.CaptureContext{Actor:map[string]any{"type":"user","id":r.Header.Get("X-User-ID")}});http.Error(w,"internal",500)}}();w.Write([]byte("ok"))}); s:=&http.Server{Addr:":8080",Handler:mux};go s.ListenAndServe();ch:=make(chan os.Signal,1);signal.Notify(ch,syscall.SIGINT,syscall.SIGTERM);<-ch;s.Shutdown(context.Background());if err:=c.Close(context.Background());err!=nil{log.Print(err)} }
+
+import (
+	"context"
+	"github.com/oneverse-technologies/lazers-go"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	c, _ := lazers.NewClient(lazers.Config{APIKey: os.Getenv("LAZERS_API_KEY"), Endpoint: "https://api.lazers.app", ProjectID: "project_1", Environment: "production", ServiceName: "http-api"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				c.CaptureMessage("panic recovered", lazers.CaptureContext{Actor: map[string]any{"type": "user", "id": r.Header.Get("X-User-ID")}})
+				http.Error(w, "internal", 500)
+			}
+		}()
+		w.Write([]byte("ok"))
+	})
+	s := &http.Server{Addr: ":8080", Handler: mux}
+	go s.ListenAndServe()
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
+	s.Shutdown(context.Background())
+	if err := c.Close(context.Background()); err != nil {
+		log.Print(err)
+	}
+}
