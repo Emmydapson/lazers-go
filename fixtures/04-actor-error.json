@@ -1,0 +1,1 @@
+{"name":"actor-specific error","helper":"captureError","input":{"actor":{"type":"customer","id":"cust_2048","label":"Acme"}},"expect":{"actor":{"type":"customer","id":"cust_2048"},"fingerprintExcludes":"actor"}}

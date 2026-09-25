@@ -1,0 +1,1 @@
+{"name":"job failure","helper":"captureJobFailure","input":{"jobName":"daily-sync","error":{"name":"Error","message":"sync failed"}},"expect":{"eventCategory":"job_failure","resource":{"type":"job","id":"daily-sync"}}}

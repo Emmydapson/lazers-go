@@ -1,0 +1,1 @@
+{"name":"provider timeout","helper":"captureSignal","input":{"eventCategory":"provider_failure","provider":"stripe","message":"timeout"},"expect":{"eventCategory":"provider_failure"}}

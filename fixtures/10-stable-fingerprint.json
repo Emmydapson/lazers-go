@@ -1,0 +1,1 @@
+{"name":"stable fingerprint","runs":[{"traceId":"exec_a"},{"traceId":"exec_b"}],"expect":{"sameFingerprint":true,"fingerprintExcludes":["traceId","correlationId","actor","timestamp"]}}

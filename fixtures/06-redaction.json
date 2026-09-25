@@ -1,0 +1,1 @@
+{"name":"redaction","input":{"metadata":{"password":"x","nested":{"accessToken":"y"},"safe":"ok"}},"expect":{"metadata":{"password":"[REDACTED]","nested":{"accessToken":"[REDACTED]"},"safe":"ok"}}}

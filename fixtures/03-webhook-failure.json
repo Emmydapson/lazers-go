@@ -1,0 +1,1 @@
+{"name":"webhook failure","helper":"captureWebhookFailure","input":{"provider":"stripe","error":{"name":"Error","message":"signature failed"}},"expect":{"eventCategory":"webhook_failure","eventName":"webhook.failure"}}

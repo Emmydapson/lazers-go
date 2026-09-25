@@ -1,0 +1,1 @@
+{"name":"simple error","helper":"captureError","input":{"error":{"name":"Error","message":"Database timeout"}},"expect":{"eventCategory":"error","severity":"error","correlationId":"omitted"}}
