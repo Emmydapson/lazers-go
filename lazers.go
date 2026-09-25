@@ -318,6 +318,34 @@ func (c *Client) normalize(in SignalInput) map[string]any {
 	return result
 }
 func (x CaptureContext) ContextRelease() string { return "" }
+
+// copyMap returns an independently owned copy of input. Protocol container
+// values are copied recursively so later normalization cannot mutate caller-
+// owned metadata or payload values.
+func copyMap(input map[string]any) map[string]any {
+	out := make(map[string]any, len(input))
+	for key, value := range input {
+		out[key] = copyProtocolValue(value)
+	}
+	return out
+}
+
+func copyProtocolValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return copyMap(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = copyProtocolValue(item)
+		}
+		return out
+	case []string:
+		return append([]string(nil), v...)
+	default:
+		return value
+	}
+}
 func serializeError(err error, depth int) map[string]any {
 	if err == nil {
 		return map[string]any{"name": "NilError", "message": "<nil>"}
