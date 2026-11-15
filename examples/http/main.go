@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
-	"github.com/oneverse-technologies/lazers-go"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+
+	lazers "github.com/Emmydapson/lazers/packages/go-sdk"
 )
 
 func main() {

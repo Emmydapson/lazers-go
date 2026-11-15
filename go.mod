@@ -1,3 +1,3 @@
-module github.com/oneverse-technologies/lazers-go
+module github.com/Emmydapson/lazers/packages/go-sdk
 
 go 1.22
