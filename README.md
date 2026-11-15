@@ -9,7 +9,7 @@ Repository: [https://github.com/Emmydapson/lazers](https://github.com/Emmydapson
 ## Installation
 
 ```bash
-go get github.com/Emmydapson/lazers/packages/go-sdk@v0.1.0
+go get github.com/Emmydapson/lazers-go@v0.1.0
 ```
 
 For nested monorepo modules, Go module semantic version tags follow the standard format:
@@ -24,7 +24,7 @@ import (
 	"context"
 	"os"
 
-	lazers "github.com/Emmydapson/lazers/packages/go-sdk"
+	lazers "github.com/Emmydapson/lazers-go"
 )
 
 func main() {

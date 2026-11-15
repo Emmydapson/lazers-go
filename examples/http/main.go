@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	lazers "github.com/Emmydapson/lazers/packages/go-sdk"
+	lazers "github.com/Emmydapson/lazers-go"
 )
 
 func main() {

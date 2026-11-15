@@ -1,3 +1,3 @@
-module github.com/Emmydapson/lazers/packages/go-sdk
+module github.com/Emmydapson/lazers-go
 
 go 1.22
